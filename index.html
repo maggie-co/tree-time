@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trees &amp; Floods — St. Louis</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root {
+    --bg: #111111;
+    --panel: #1a1a1a;
+    --border: #333333;
+    --text: #e8e8e8;
+    --muted: #999999;
+    --accent: #4caf7d;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: Helvetica, Arial, sans-serif;
+  }
+  #map { position: absolute; inset: 0; }
+
+  #panel {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    width: 280px;
+    max-height: calc(100% - 32px);
+    overflow-y: auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 16px;
+    z-index: 2;
+  }
+  #panel h1 {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin: 0 0 4px;
+  }
+  #panel .subtitle {
+    font-size: 11px;
+    color: var(--muted);
+    margin: 0 0 16px;
+  }
+  .group-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 16px 0 4px;
+  }
+  .group-label:first-of-type { margin-top: 0; }
+
+  .layer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+    font-size: 12.5px;
+    position: relative;
+  }
+  .group-label + .layer-row { border-top: none; }
+  .layer-row label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+  }
+  .swatch {
+    width: 10px;
+    height: 10px;
+    flex: none;
+    border-radius: 2px;
+  }
+  .layer-row input[type="checkbox"] {
+    accent-color: var(--accent);
+  }
+  .info-btn {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    border-radius: 50%;
+    border: 1px solid var(--muted);
+    color: var(--muted);
+    font-size: 10px;
+    line-height: 14px;
+    text-align: center;
+    cursor: default;
+  }
+  .tooltip {
+    display: none;
+    position: absolute;
+    top: 0;
+    right: 100%;
+    margin-right: 8px;
+    width: 220px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 10px;
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.5;
+    z-index: 3;
+  }
+  .tooltip strong { color: var(--text); }
+  .info-btn:hover + .tooltip,
+  .tooltip:hover {
+    display: block;
+  }
+
+  .maplibregl-popup-content {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 12px;
+    padding: 10px 12px;
+    max-width: 260px;
+  }
+  .maplibregl-popup-tip { border-top-color: var(--panel) !important; }
+  .maplibregl-popup-close-button { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="panel">
+  <h1>Trees &amp; Floods</h1>
+  <p class="subtitle">St. Louis City, canopy vs. flood risk</p>
+  <div id="layer-list"></div>
+</div>
+
+<script>
+/*
+ * Layer config. Each entry describes one source/layer pair.
+ * geomType drives which MapLibre layer type + paint we build.
+ * source: "STL_FLOOD_MAP" layers came from
+ *   https://maps6.stlouis-mo.gov/arcgis/rest/services/St_Louis_Flood_Risk_Map/MapServer
+ * "trees" came from City of St. Louis Tree Inventory (reprojected, see prior build).
+ */
+const LAYERS = [
+  {
+    id: 'trees', file: 'trees_slim.json', geomType: 'point', group: 'Canopy',
+    label: 'Existing trees', color: '#4caf7d', defaultOn: true,
+    source: 'City of St. Louis Tree Inventory',
+    detail: 'Point shapefile, reprojected from NAD83 StatePlane MO East (ftUS) to WGS84.',
+    popup: f => `<strong>${f.species || 'Unknown species'}</strong><br>DBH: ${f.dbh}"<br>Condition: ${f.condition || 'n/a'}<br>${f.address || ''}`
+  },
+  {
+    id: 'stlouis-water', file: 'stlouis_water.json', geomType: 'polygon', group: 'Water bodies',
+    label: 'Rivers & lakes', color: '#3f6f99', defaultOn: true,
+    source: 'City of St. Louis Flood Risk Map (STLOUIS WATER)',
+    detail: 'Polygon layer, 3,108 features. Base hydrology for the city.',
+    popup: f => `<strong>Water body</strong>`
+  },
+  {
+    id: 'stlouis-rivers', file: 'stlouis_rivers.json', geomType: 'polygon', group: 'Water bodies',
+    label: 'Named rivers', color: '#5590c2', defaultOn: false,
+    source: 'City of St. Louis Flood Risk Map (STLOUIS RIVERS)',
+    detail: 'Polygon layer with name, municipality, state, type fields.',
+    popup: f => `<strong>${f.NAME || 'River'}</strong><br>${f.Municipality || ''}, ${f.State || ''}`
+  },
+  {
+    id: 'mississippi-river', file: 'mississippi_river.json', geomType: 'polygon', group: 'Water bodies',
+    label: 'Mississippi River', color: '#2d5f88', defaultOn: false,
+    source: 'City of St. Louis Flood Risk Map (Mississippi River, NHD-derived)',
+    detail: 'Polygon layer, GNIS-sourced. FType/FCode from National Hydrography Dataset.',
+    popup: f => `<strong>${f.GNIS_Name || 'Mississippi River'}</strong><br>Area: ${f.AreaSqKm ? f.AreaSqKm.toFixed(2) + ' km²' : 'n/a'}`
+  },
+  {
+    id: 'historic-lakes', file: 'historic_lakes.json', geomType: 'polygon', group: 'Water bodies',
+    label: 'Historic lakes', color: '#7a5fa8', defaultOn: false,
+    source: 'City of St. Louis Flood Risk Map (HistoricLakes)',
+    detail: 'Lakes present historically but no longer mapped as open water — 2 features.',
+    popup: f => `<strong>${f.Name || 'Historic lake'}</strong><br>Source: ${f.Source || 'n/a'}`
+  },
+  {
+    id: 'historic-streams', file: 'historic_streams.json', geomType: 'line', group: 'Hydrology history',
+    label: 'Historic streams', color: '#6fb3d9', defaultOn: true,
+    source: 'City of St. Louis Flood Risk Map (HistoricStreams)',
+    detail: 'Streams from historical maps, many since piped or buried. 275 features.',
+    popup: f => `<strong>${f.Name || 'Unnamed historic stream'}</strong><br>Source: ${f.Source || 'n/a'}, ${f.Publicatio || ''}`
+  },
+  {
+    id: 'modern-hydro', file: 'modern_hydro_flow_routes.json', geomType: 'line', group: 'Hydrology history',
+    label: 'Modern flow routes', color: '#8fd1e0', defaultOn: true,
+    source: 'City of St. Louis Flood Risk Map (ModernHydroFlowRoutes)',
+    detail: 'Modeled current-day surface flow paths, derived hydrology. 136 features.',
+    popup: f => `<strong>Modeled flow route</strong>`
+  },
+  {
+    id: 'floodwall', file: 'floodwall.json', geomType: 'line', group: 'Hydrology history',
+    label: 'Floodwall', color: '#cccccc', defaultOn: false,
+    source: 'City of St. Louis Flood Risk Map (STLOUIS FLOODWALL)',
+    detail: 'Engineered floodwall/levee segments along the riverfront. 42 features.',
+    popup: f => `<strong>Floodwall segment</strong>`
+  },
+  {
+    id: 'floodplain', file: 'stl_floodplain.json', geomType: 'polygon', group: 'Flood risk',
+    label: 'FEMA floodplain (city-curated)', color: '#e8a13f', defaultOn: true,
+    source: 'City of St. Louis Flood Risk Map (STL_Floodplain)',
+    detail: 'FLD_ZONE / SFHA_TF classification, 329 features. City-maintained FEMA-derived layer.',
+    popup: f => `<strong>Flood zone ${f.FLD_ZONE || ''}</strong><br>SFHA: ${f.SFHA_TF === 'T' ? 'Yes' : 'No'}<br>Floodway: ${f.FLOODWAY || 'n/a'}`
+  },
+  {
+    id: 'impacted-blocks', file: 'impacted_blocks_flood_2022.json', geomType: 'polygon', group: 'Flood risk',
+    label: 'July 2022 flood-impacted parcels', color: '#d64f8a', defaultOn: true,
+    source: 'City of St. Louis Emergency Management Agency',
+    detail: '752 parcels reported via 2-1-1 / United Way calls after the July 25, 2022 flash flood. Fields include damage type, extent, insurance status.',
+    popup: f => `<strong>${(f.address || '').trim()}</strong><br>${f.structure_type || ''}<br>Damage: ${f.water_damage_amount || 'n/a'} (${f.water_damage_location || ''})<br>Insurance contacted: ${f.insurance_contacted || 'n/a'}`
+  },
+  {
+    id: 'msd-problem-areas', file: 'msd_problem_areas.json', geomType: 'polygon', group: 'MSD infrastructure',
+    label: 'MSD problem areas', color: '#e8822f', defaultOn: true,
+    source: 'Metropolitan St. Louis Sewer District (MSD_ProblemAreas)',
+    detail: '77 known stormwater/sewer problem areas identified by MSD.',
+    popup: f => `<strong>MSD problem area</strong><br>${f.PROBAREA || ''}`
+  },
+  {
+    id: 'msd-stormwater-projects', file: 'msd_large_stormwater_projects.json', geomType: 'polygon', group: 'MSD infrastructure',
+    label: 'MSD large stormwater projects', color: '#6fbf6f', defaultOn: true,
+    source: 'Metropolitan St. Louis Sewer District (MSD_LargeScale_Stormwater_Projects)',
+    detail: '262 parcels within large-scale MSD stormwater project footprints.',
+    popup: f => `<strong>${(f.address || '').trim() || 'Stormwater project parcel'}</strong><br>${f.subtype || ''} ${f.poly_type || ''}<br>${f.notes || ''}`
+  },
+  {
+    id: 'msd-ownership', file: 'msd_ownership.json', geomType: 'polygon', group: 'MSD infrastructure',
+    label: 'MSD-owned parcels', color: '#888888', defaultOn: false,
+    source: 'Metropolitan St. Louis Sewer District (MSD_OWNERSHIP)',
+    detail: '292 parcels owned by MSD.',
+    popup: f => `<strong>${f.Address || 'MSD parcel'}</strong><br>${f.Owner_1 || ''}`
+  }
+];
+
+const panel = document.getElementById('layer-list');
+let lastGroup = null;
+LAYERS.forEach(l => {
+  if (l.group !== lastGroup) {
+    const gl = document.createElement('div');
+    gl.className = 'group-label';
+    gl.textContent = l.group;
+    panel.appendChild(gl);
+    lastGroup = l.group;
+  }
+  const row = document.createElement('div');
+  row.className = 'layer-row';
+  row.innerHTML = `
+    <label>
+      <input type="checkbox" id="toggle-${l.id}" ${l.defaultOn ? 'checked' : ''}>
+      <span class="swatch" style="background:${l.color}"></span>
+      ${l.label}
+    </label>
+    <span class="info-btn">i</span>
+    <div class="tooltip">
+      <strong>${l.source}</strong><br>
+      ${l.detail}
+    </div>
+  `;
+  panel.appendChild(row);
+});
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    sources: {},
+    layers: [{
+      id: 'background',
+      type: 'background',
+      paint: { 'background-color': '#111111' }
+    }]
+  },
+  center: [-90.25, 38.63],
+  zoom: 11.5
+});
+
+map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+map.on('load', () => {
+  const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+
+  LAYERS.forEach(l => {
+    map.addSource(l.id, { type: 'geojson', data: `data/${l.file}` });
+
+    if (l.geomType === 'point') {
+      map.addLayer({
+        id: l.id, type: 'circle', source: l.id,
+        layout: { visibility: l.defaultOn ? 'visible' : 'none' },
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 1, 16, 4],
+          'circle-color': l.color,
+          'circle-opacity': 0.7,
+          'circle-stroke-width': 0
+        }
+      });
+    } else if (l.geomType === 'line') {
+      map.addLayer({
+        id: l.id, type: 'line', source: l.id,
+        layout: { visibility: l.defaultOn ? 'visible' : 'none' },
+        paint: {
+          'line-color': l.color,
+          'line-width': 1.2,
+          'line-opacity': 0.85
+        }
+      });
+    } else {
+      map.addLayer({
+        id: l.id + '-fill', type: 'fill', source: l.id,
+        layout: { visibility: l.defaultOn ? 'visible' : 'none' },
+        paint: { 'fill-color': l.color, 'fill-opacity': 0.35 }
+      });
+      map.addLayer({
+        id: l.id + '-line', type: 'line', source: l.id,
+        layout: { visibility: l.defaultOn ? 'visible' : 'none' },
+        paint: { 'line-color': l.color, 'line-width': 0.6, 'line-opacity': 0.7 }
+      });
+    }
+
+    const hoverLayerId = l.geomType === 'polygon' ? l.id + '-fill' : l.id;
+    map.on('mousemove', hoverLayerId, (e) => {
+      map.getCanvas().style.cursor = 'pointer';
+      const f = e.features[0].properties;
+      popup.setLngLat(e.lngLat).setHTML(l.popup(f)).addTo(map);
+    });
+    map.on('mouseleave', hoverLayerId, () => {
+      map.getCanvas().style.cursor = '';
+      popup.remove();
+    });
+
+    document.getElementById(`toggle-${l.id}`).addEventListener('change', (e) => {
+      const vis = e.target.checked ? 'visible' : 'none';
+      if (l.geomType === 'polygon') {
+        map.setLayoutProperty(l.id + '-fill', 'visibility', vis);
+        map.setLayoutProperty(l.id + '-line', 'visibility', vis);
+      } else {
+        map.setLayoutProperty(l.id, 'visibility', vis);
+      }
+    });
+  });
+});
+</script>
+
+</body>
+</html>
